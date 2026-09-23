@@ -1,0 +1,28 @@
+{
+  "name": "kredo",
+  "version": "1.0.0",
+  "type": "module",
+  "main": "app.js",
+  "scripts": {
+    "start": "node app.js",
+    "dev": "nodemon app.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/atosin056/kredo.git"
+  },
+  "author": "Tosin",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/atosin056/kredo/issues"
+  },
+  "homepage": "https://github.com/atosin056/kredo#readme",
+  "description": "",
+  "dependencies": {
+    "@google/genai": "^2.24.0",
+    "dotenv": "^18.0.3",
+    "express": "^5.2.1",
+    "grammy": "^1.46.0",
+    "mysql2": "^3.24.4"
+  }
+}

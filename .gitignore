@@ -1,3 +1,27 @@
-backend/node_modules/
+# dependencies
+**/node_modules/
+
+# environment files
+**/.env
+**/.env.*
+!.env.example
+
+# logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# expo / react native
+mobile/.expo/
+mobile/dist/
+mobile/.expo-shared/
+mobile/web-build/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+
+# backend extras
 backend/.env
-.env
+backend/.env.*

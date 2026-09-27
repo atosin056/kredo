@@ -2,10 +2,11 @@ import { View, StyleSheet, Image, Text, Pressable } from "react-native";
 import LogoWhite from "../../assets/images/logo-white.svg";
 import * as LocalAuthentication from "expo-local-authentication";
 import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
-import LogoGreen from "../../../assets/images/logo-green.svg";
-import FingerPrint from "../../../assets/images/Fingerprint.svg";
+import LogoGreen from "../../assets/images/logo-green.svg";
+import FingerPrint from "../../assets/images/Fingerprint.svg";
 import { useFonts } from "expo-font";
 import { useEffect } from "react";
+import { useRouter } from "expo-router";
 import Svg, {
   Circle,
   Defs,
@@ -22,13 +23,15 @@ export default function Index() {
     }
   }, [fontsLoaded]);
   const [fontsLoaded] = useFonts({
-    "InstrumentSans-Regular": require("../../../assets/fonts/Instrument_Sans/static/InstrumentSans-Regular.ttf"),
-    "InstrumentSans-Bold": require("../../../assets/fonts/Instrument_Sans/static/InstrumentSans-Bold.ttf"),
-    "InstrumentSans-Medium": require("../../../assets/fonts/Instrument_Sans/static/InstrumentSans-Medium.ttf"),
-    "InstrumentSans-SemiBold": require("../../../assets/fonts/Instrument_Sans/static/InstrumentSans-SemiBold.ttf"),
+    "InstrumentSans-Regular": require("../../assets/fonts/Instrument_Sans/static/InstrumentSans-Regular.ttf"),
+    "InstrumentSans-Bold": require("../../assets/fonts/Instrument_Sans/static/InstrumentSans-Bold.ttf"),
+    "InstrumentSans-Medium": require("../../assets/fonts/Instrument_Sans/static/InstrumentSans-Medium.ttf"),
+    "InstrumentSans-SemiBold": require("../../assets/fonts/Instrument_Sans/static/InstrumentSans-SemiBold.ttf"),
   });
 
   if (!fontsLoaded) return null;
+
+  const router = useRouter();
 
   const handleVerifyFingerprint = async () => {
     const hasHardware = await LocalAuthentication.hasHardwareAsync();
@@ -36,21 +39,19 @@ export default function Index() {
       console.log("No biometric hardware on this device");
       return;
     }
-
     const isEnrolled = await LocalAuthentication.isEnrolledAsync();
     if (!isEnrolled) {
       console.log("No fingerprint/face enrolled on this device");
       return;
     }
-
     const result = await LocalAuthentication.authenticateAsync({
       promptMessage: "Verify your identity",
       cancelLabel: "Cancel",
       disableDeviceFallback: false, // true = don't allow PIN/passcode fallback
     });
-
     if (result.success) {
       // proceed — navigate to home, unlock session, etc.
+      router.push("Dashboard");
     } else {
       // result.error tells you why: "user_cancel", "lockout", "not_available", etc.
       console.log("Auth failed:", result.error);

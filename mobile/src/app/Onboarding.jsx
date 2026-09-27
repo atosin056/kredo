@@ -1,7 +1,7 @@
 import { View, StyleSheet, Image, Text, Pressable } from "react-native";
-import LogoWhite from "../../../assets/images/logo-white.svg";
-import card1 from "../../../assets/images/card1.png";
-import card2 from "../../../assets/images/card2.png";
+import LogoWhite from "../../assets/images/logo-white.svg";
+import card1 from "../../assets/images/card1.png";
+import card2 from "../../assets/images/card2.png";
 import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
 import { useFonts } from "expo-font";
 import Svg, {
@@ -13,15 +13,19 @@ import Svg, {
   FeGaussianBlur,
 } from "react-native-svg";
 
-export default function Home() {
+import { useRouter } from "expo-router";
+
+export default function Onboarding() {
   const [fontsLoaded] = useFonts({
-    "InstrumentSans-Regular": require("../../../assets/fonts/Instrument_Sans/static/InstrumentSans-Regular.ttf"),
-    "InstrumentSans-Bold": require("../../../assets/fonts/Instrument_Sans/static/InstrumentSans-Bold.ttf"), // ❌ missing "assets/"
-    "InstrumentSans-Medium": require("../../../assets/fonts/Instrument_Sans/static/InstrumentSans-Medium.ttf"),
-    "InstrumentSans-SemiBold": require("../../../assets/fonts/Instrument_Sans/static/InstrumentSans-SemiBold.ttf"),
+    "InstrumentSans-Regular": require("../../assets/fonts/Instrument_Sans/static/InstrumentSans-Regular.ttf"),
+    "InstrumentSans-Bold": require("../../assets/fonts/Instrument_Sans/static/InstrumentSans-Bold.ttf"), // ❌ missing "assets/"
+    "InstrumentSans-Medium": require("../../assets/fonts/Instrument_Sans/static/InstrumentSans-Medium.ttf"),
+    "InstrumentSans-SemiBold": require("../../assets/fonts/Instrument_Sans/static/InstrumentSans-SemiBold.ttf"),
   });
 
   if (!fontsLoaded) return null;
+
+  const router = useRouter();
 
   return (
     <SafeAreaProvider style={{ flex: 1, backgroundColor: "#011208" }}>
@@ -132,6 +136,7 @@ export default function Home() {
             <Pressable
               onPress={() => {
                 /* navigate or handle signup start */
+                router.push("Register");
               }}
               style={({ pressed }) => [
                 {

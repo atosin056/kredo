@@ -1,11 +1,9 @@
 import { View, StyleSheet, Image, Text, Pressable } from "react-native";
 import LogoWhite from "../../assets/images/logo-white.svg";
-import * as LocalAuthentication from "expo-local-authentication";
+import card1 from "../../assets/images/card1.png";
+import card2 from "../../assets/images/card2.png";
 import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
-import LogoGreen from "../../assets/images/logo-green.svg";
-import FingerPrint from "../../assets/images/Fingerprint.svg";
 import { useFonts } from "expo-font";
-import { useEffect } from "react";
 import Svg, {
   Circle,
   Defs,
@@ -15,47 +13,19 @@ import Svg, {
   FeGaussianBlur,
 } from "react-native-svg";
 
+import { useRouter } from "expo-router";
+
 export default function Index() {
-  useEffect(() => {
-    if (fontsLoaded) {
-      handleVerifyFingerprint();
-    }
-  }, [fontsLoaded]);
   const [fontsLoaded] = useFonts({
     "InstrumentSans-Regular": require("../../assets/fonts/Instrument_Sans/static/InstrumentSans-Regular.ttf"),
-    "InstrumentSans-Bold": require("../../assets/fonts/Instrument_Sans/static/InstrumentSans-Bold.ttf"),
+    "InstrumentSans-Bold": require("../../assets/fonts/Instrument_Sans/static/InstrumentSans-Bold.ttf"), // ❌ missing "assets/"
     "InstrumentSans-Medium": require("../../assets/fonts/Instrument_Sans/static/InstrumentSans-Medium.ttf"),
     "InstrumentSans-SemiBold": require("../../assets/fonts/Instrument_Sans/static/InstrumentSans-SemiBold.ttf"),
   });
 
   if (!fontsLoaded) return null;
 
-  const handleVerifyFingerprint = async () => {
-    const hasHardware = await LocalAuthentication.hasHardwareAsync();
-    if (!hasHardware) {
-      console.log("No biometric hardware on this device");
-      return;
-    }
-
-    const isEnrolled = await LocalAuthentication.isEnrolledAsync();
-    if (!isEnrolled) {
-      console.log("No fingerprint/face enrolled on this device");
-      return;
-    }
-
-    const result = await LocalAuthentication.authenticateAsync({
-      promptMessage: "Verify your identity",
-      cancelLabel: "Cancel",
-      disableDeviceFallback: false, // true = don't allow PIN/passcode fallback
-    });
-
-    if (result.success) {
-      // proceed — navigate to home, unlock session, etc.
-    } else {
-      // result.error tells you why: "user_cancel", "lockout", "not_available", etc.
-      console.log("Auth failed:", result.error);
-    }
-  };
+  const router = useRouter();
 
   return (
     <SafeAreaProvider style={{ flex: 1, backgroundColor: "#011208" }}>
@@ -100,96 +70,96 @@ export default function Index() {
           <LogoWhite style={{ marginTop: 0, marginLeft: 0 }} />
         </View>
 
+        {/* card stack */}
         <View
           style={{
-            flex: 1,
-            justifyContent: "center",
-            alignItems: "center",
-            flex: 1,
+            width: "100%",
+            height: 470,
+            position: "relative",
+            top: -80,
           }}
         >
-          <View
+          {/* blue card - sits behind, lower-left */}
+          <Image
+            source={card2}
+            resizeMode="contain"
             style={{
-              justifyContent: "space-between",
-              alignItems: "center",
-              flex: 0.7,
+              position: "absolute",
+              width: "100%",
+              aspectRatio: 1.586, // standard card ratio ~85.6/54
+              top: 90,
+              left: -70,
+              transform: [{ rotate: "20deg" }],
+              zIndex: 1,
             }}
-          >
-            <View
+          />
+
+          {/* red UBA card - sits in front, upper-right */}
+          <Image
+            source={card1}
+            resizeMode="contain"
+            style={{
+              position: "absolute",
+              width: "100%",
+              aspectRatio: 1.586,
+              top: -90,
+              left: 90,
+              transform: [{ rotate: "-20deg" }],
+              zIndex: 2,
+            }}
+          />
+        </View>
+
+        {/* Bottom Text */}
+        <View>
+          <View>
+            <Text
               style={{
-                gap: 50,
-                justifyContent: "center",
-                alignItems: "center",
+                color: "#fff",
+                fontSize: 40,
+                fontFamily: "InstrumentSans-Bold",
+                letterSpacing: -3,
               }}
             >
-              <View>
-                <LogoGreen />
-              </View>
-              <View>
-                <FingerPrint />
-              </View>
-              <Pressable
-                onPress={() => {
-                  handleVerifyFingerprint();
-                  /* navigate or handle signup start */
+              Banking, made conversational
+            </Text>
+            <Text
+              style={{
+                fontFamily: "InstrumentSans-Regular",
+                color: "grey",
+                fontSize: 17,
+                letterSpacing: -1,
+              }}
+            >
+              Talk, type, or send a screenshot. Kredo understands what you mean.
+            </Text>
+            <Pressable
+              onPress={() => {
+                /* navigate or handle signup start */
+                router.push("Register");
+              }}
+              style={({ pressed }) => [
+                {
+                  backgroundColor: "#CBE31B",
+                  paddingVertical: 16,
+                  borderRadius: 100,
+                  alignItems: "center",
+                  marginTop: 24,
+                  opacity: pressed ? 0.7 : 1,
+                },
+              ]}
+              android_ripple={{ color: "#00000022" }}
+            >
+              <Text
+                style={{
+                  color: "#011208",
+                  fontFamily: "InstrumentSans-SemiBold",
+                  fontSize: 16,
                 }}
-                style={({ pressed }) => [
-                  {
-                    backgroundColor: "#CBE31B",
-                    paddingVertical: 16,
-                    borderRadius: 100,
-                    paddingHorizontal: 20,
-                    alignItems: "center",
-                    marginTop: 24,
-                    opacity: pressed ? 0.7 : 1,
-                  },
-                ]}
-                android_ripple={{ color: "#00000022" }}
               >
-                <Text
-                  style={{
-                    color: "#011208",
-                    fontFamily: "InstrumentSans-SemiBold",
-                    fontSize: 16,
-                  }}
-                >
-                  Click to Verify Fingerprint
-                </Text>
-              </Pressable>
-            </View>
-            <View
-              style={{
-                flexDirection: "Column",
-                alignItems: "center",
-                gap: 10,
-                justifyContent: "flex-end",
-              }}
-            >
-              <View>
-                <Text
-                  style={{
-                    color: "white",
-                    fontFamily: "InstrumentSans-Bold",
-                    letterSpacing: -1,
-                  }}
-                >
-                  OR
-                </Text>
-              </View>
-              <Pressable
-                style={({ pressed }) => []}
-                android_ripple={{ color: "#CBE31B44" }}
-              >
-                <Text
-                  style={{
-                    color: "#A4B816",
-                    fontFamily: "InstrumentSans-SemiBold",
-                  }}
-                >
-                  Login with PIN
-                </Text>
-              </Pressable>
-            </View>
+                Get Started
+              </Text>
+            </Pressable>
           </View>
         </View>
       </SafeAreaView>

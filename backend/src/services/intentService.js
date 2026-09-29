@@ -23,7 +23,8 @@ CRITICAL OUTPUT CONTRACT:
     "recipient_name": "string or null",
     "sender_bank": "string or null",
     "from_date": "string or null",
-    "to_date": "string or null"
+    "to_date": "string or null",
+    "recipient_is_self": true | false | null
   },
   "transfers": [
     {
@@ -31,17 +32,26 @@ CRITICAL OUTPUT CONTRACT:
       "recipient_account_number": "string or null",
       "recipient_bank": "string or null",
       "recipient_name": "string or null",
-      "sender_bank": "string or null"
+      "sender_bank": "string or null",
+      "recipient_is_self": true | false
     }
   ],
   "confidence": 0.0,
   "raw_input": "the original user message"
 }
 - Every key above must exist in the JSON object.
-- If a field is not mentioned, use null.
+- If a field is not mentioned, use null (except recipient_is_self on a transfer, see below).
 - If intent is not transfer_request, then transfers must be an empty array [].
 - If the message contains multiple transfers, keep the top-level intent as transfer_request and put each transfer in the transfers array in order.
 - Never output just the transfers array by itself.
+- recipient_is_self = true when the money goes to the user's OWN account
+  ("to my opay", "my other account", "myself", "to my GTB").
+  If the recipient is someone else, use false.
+  For a transfer, never return null for recipient_is_self: use true or false.
+Examples:
+- "send 2k from my palmpay to my opay" -> sender_bank "Palmpay", recipient_bank "Opay",
+  recipient_is_self true, recipient_account_number null, recipient_name null
+- "send 5k to 7031272572 on opay" -> recipient_is_self false
 `;
 
 const TEXT_SYSTEM_PROMPT = `
@@ -91,7 +101,7 @@ Copy account numbers EXACTLY as visible. Never invent or change digits.
 
 For each transfer, extract:
 amount, recipient_account_number, recipient_bank,
-recipient_name, sender_bank.
+recipient_name, sender_bank, recipient_is_self.
 
 Combine information from the image and text.
 Preserve multiple transfers in order.
@@ -134,6 +144,7 @@ const ENTITY_KEYS = [
   "sender_bank",
   "from_date",
   "to_date",
+  "recipient_is_self",
 ];
 
 const TRANSFER_ENTITY_KEYS = [
@@ -142,7 +153,14 @@ const TRANSFER_ENTITY_KEYS = [
   "recipient_bank",
   "recipient_name",
   "sender_bank",
+  "recipient_is_self",
 ];
+
+const RECIPIENT_IS_SELF_SCHEMA = {
+  type: ["boolean", "null"],
+  description:
+    "true if the money goes to the user's OWN account (e.g. 'to my opay', 'myself', 'my other account'). false if it goes to another person.",
+};
 
 const TRANSFER_ENTITY_SCHEMA = {
   type: "object",
@@ -152,6 +170,7 @@ const TRANSFER_ENTITY_SCHEMA = {
     recipient_bank: { type: ["string", "null"] },
     recipient_name: { type: ["string", "null"] },
     sender_bank: { type: ["string", "null"] },
+    recipient_is_self: RECIPIENT_IS_SELF_SCHEMA,
   },
   required: TRANSFER_ENTITY_KEYS,
 };
@@ -182,6 +201,7 @@ const INTENT_SCHEMA = {
         sender_bank: { type: ["string", "null"] },
         from_date: { type: ["string", "null"] },
         to_date: { type: ["string", "null"] },
+        recipient_is_self: RECIPIENT_IS_SELF_SCHEMA,
       },
       required: ENTITY_KEYS, // forces every entity key to be present, value can still be null
     },
@@ -262,6 +282,25 @@ export function normalizeParsedIntent(
     transfers = transferList.map(normalizeTransferEntity);
   } else if (intent === "transfer_request") {
     transfers = [normalizeTransferEntity(entities)];
+  }
+
+  // Safety net: don't rely only on the LLM to flag "to my <bank>" transfers.
+  // The negative lookahead avoids treating "to my brother's opay" as self.
+  const SELF_RE =
+    /\b(?:(?:to|into)\s+my\s+(?!(?:brother|sister|mum|mom|dad|papa|mama|friend|wife|husband|boss|oga|landlord|guy|girl)\b)|myself\b|my\s+(?:own|other)\s+account)/i;
+
+  if (intent === "transfer_request" && SELF_RE.test(fallbackRawInput || "")) {
+    for (const t of transfers) {
+      if (t.recipient_is_self == null && !t.recipient_account_number) {
+        t.recipient_is_self = true;
+      }
+    }
+    if (
+      entities.recipient_is_self == null &&
+      !entities.recipient_account_number
+    ) {
+      entities.recipient_is_self = true;
+    }
   }
 
   return {

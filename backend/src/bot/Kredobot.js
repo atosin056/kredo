@@ -106,6 +106,13 @@ class Kredobot {
       }
     }
 
+    const selfError = await this.applySelfRecipient(userId, draft);
+    if (selfError) {
+      this.sessions.delete(userId);
+      await ctx.reply(selfError);
+      return true;
+    }
+
     const missingFields = this.getMissingTransferFields(draft);
 
     if (!missingFields.length) {
@@ -165,6 +172,41 @@ class Kredobot {
 
     await ctx.reply(this.getTransferPrompt(pendingField));
     return true;
+  }
+
+  async applySelfRecipient(userId, draft) {
+    if (
+      !draft.recipient_is_self ||
+      draft.recipient_account_number ||
+      !draft.recipient_bank
+    ) {
+      return null;
+    }
+
+    const norm = (s) =>
+      String(s || "")
+        .trim()
+        .toLowerCase();
+    const accounts = await this.getUserBankAccounts(userId);
+    const matches = accounts.filter(
+      (a) => norm(a.bank_name) === norm(draft.recipient_bank),
+    );
+
+    if (!matches.length) {
+      return `You don't have a ${draft.recipient_bank} account linked yet. Use /add_account first.`;
+    }
+    if (
+      norm(draft.sender_bank) === norm(draft.recipient_bank) &&
+      matches.length === 1
+    ) {
+      return "That's the same account you're sending from. Pick a different one.";
+    }
+
+    const target = matches[0];
+    draft.recipient_account_number = target.account_no;
+    draft.recipient_bank = target.bank_name;
+    draft.recipient_name = target.account_name;
+    return null;
   }
 
   /**
@@ -535,12 +577,17 @@ class Kredobot {
       session.draft.recipient_account_number ||
       "recipient";
 
-    const recipientAccount = await this.findRecipientAccountByName(
-      recipientName,
-      session.draft.recipient_bank,
-      session.draft.recipient_account_number,
-      userId,
-    );
+    const recipientAccount = session.draft.recipient_is_self
+      ? await this.findBankAccountByNumber(
+          session.draft.recipient_bank,
+          session.draft.recipient_account_number,
+        )
+      : await this.findRecipientAccountByName(
+          recipientName,
+          session.draft.recipient_bank,
+          session.draft.recipient_account_number,
+          userId,
+        );
     if (!recipientAccount) {
       this.sessions.delete(userId);
       await ctx.reply(
@@ -666,6 +713,7 @@ class Kredobot {
       );
       senderAccount = senderRows[0] || null;
 
+      // Null check must come BEFORE we touch senderAccount's fields.
       if (!senderAccount) {
         await conn.rollback();
         this.sessions.delete(userId);
@@ -675,6 +723,33 @@ class Kredobot {
             label: this.describeTransferDraft(session.draft),
             status: "failed",
             reason: "sender account not found",
+          });
+        }
+        await this.continueTransferQueue(
+          ctx,
+          userId,
+          queue,
+          batchResults,
+          batchTotal,
+        );
+        return;
+      }
+
+      if (
+        String(senderAccount.account_no) === String(recipientAccountNo) &&
+        String(senderAccount.bank_name).toLowerCase() ===
+          String(recipientBankName).toLowerCase()
+      ) {
+        await conn.rollback();
+        this.sessions.delete(userId);
+        await ctx.reply(
+          "You can't transfer to the same account you're sending from.",
+        );
+        if (batchTotal) {
+          batchResults.push({
+            label: this.describeTransferDraft(session.draft),
+            status: "failed",
+            reason: "same account",
           });
         }
         await this.continueTransferQueue(
@@ -1142,6 +1217,12 @@ What nickname would you like to save this beneficiary as?`,
 
           session.draft[field] = value;
 
+          const selfError = await this.applySelfRecipient(
+            userId,
+            session.draft,
+          );
+          if (selfError) return ctx.reply(selfError); // session stays, they can answer again
+
           const recipientNameInput =
             session.draft.recipient_name ||
             session.draft.recipient_bank ||
@@ -1593,10 +1674,12 @@ You can now use "${accountName}" when referring to this account. 🇳🇬`,
               return;
             }
 
+            // Single transfer: use transfers[0] (the same source the batch
+            // path uses) so recipient_is_self etc. are never lost.
             const askedFollowUp = await this.ensureTransferFollowUp(
               ctx,
               userId,
-              intent,
+              { entities: transfers[0] },
             );
 
             if (askedFollowUp) {

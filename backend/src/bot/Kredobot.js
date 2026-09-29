@@ -4,11 +4,16 @@ import sharp from "sharp";
 import "dotenv/config";
 import db from "../db/db.js";
 import extractIntent from "../services/intentService.js";
+import { sequentialize } from "@grammyjs/runner";
 
 // Hard cap on how many transfers from a single multi-transfer message we'll
 // queue up. Protects against a mis-parsed message inflating the "transfers"
 // array to something absurd.
 const MAX_TRANSFER_BATCH_SIZE = 5;
+
+// PIN brute-force protection.
+const MAX_PIN_ATTEMPTS = 3;
+const PIN_LOCK_MS = 15 * 60 * 1000;
 
 // The bot class is the Telegram orchestration layer.
 // It should coordinate user flow, command handling, and session management,
@@ -22,36 +27,70 @@ class Kredobot {
     });
 
     console.log("BOT CREATED");
-    // Local in-memory storage for users created during signup flow.
-    // This is temporary and should later be replaced with a real database layer.
-    this.accounts = [];
 
-    // Map of userId -> signup session state.
-    // Example: { telegramId, step: "name|phone|pin", ... }
+    // Map of userId -> flow session state.
+    // Example: { flow: "signup", step: "name|phone|pin", ... }
     this.sessions = new Map();
+
+    // Map of userId -> { count, lockedUntil } for wrong-PIN tracking.
+    this.pinFailures = new Map();
+
+    this.bot.use(sequentialize((ctx) => ctx.from?.id.toString()));
 
     // Register all command and message listeners when the class is instantiated.
     this.registerHandlers();
 
-    this.userAccounts_bot = [
-      { account_no: null, bank_name: null, account_name: null },
-    ];
-
-    this.userAccounts_db = [];
-
-    this.add_acct_stage = 0;
-
     console.log("HANDLERS REGISTERED");
-  }
-
-  // Start the bot polling loop.
-  start() {
-    this.bot.start();
   }
 
   // Shared helper to show Telegram typing status for user feedback.
   async typing(ctx) {
     await ctx.replyWithChatAction("typing");
+  }
+
+  // ---------------------------------------------------------------------
+  // Small helpers
+  // ---------------------------------------------------------------------
+
+  isCancelMessage(text) {
+    const t = String(text || "")
+      .trim()
+      .toLowerCase();
+    return (
+      t.length > 0 && t.length <= 30 && /\b(cancel|abort|never ?mind)\b/.test(t)
+    );
+  }
+
+  getPinLockedUntil(userId) {
+    const entry = this.pinFailures.get(userId);
+    return entry && entry.lockedUntil > Date.now() ? entry.lockedUntil : 0;
+  }
+
+  verifyPin(user, entered) {
+    const pin = String(entered || "").trim();
+    return /^\d{4}$/.test(pin) && String(user.pin) === pin;
+  }
+
+  // Ends a transfer flow (and the rest of its batch) and sends the summary.
+  async abortTransferFlow(ctx, userId, session, reason) {
+    this.sessions.delete(userId);
+    const batchTotal = session.batchTotal || null;
+    if (!batchTotal) return;
+
+    const results = session.batchResults || [];
+    results.push({
+      label: this.describeTransferDraft(session.draft),
+      status: "failed",
+      reason,
+    });
+    for (const t of session.queue || []) {
+      results.push({
+        label: this.describeTransferDraft(t),
+        status: "cancelled",
+        reason,
+      });
+    }
+    await this.sendBatchSummary(ctx, results, batchTotal);
   }
 
   getMissingTransferFields(draft = {}) {
@@ -88,6 +127,7 @@ class Kredobot {
 
     return `Enter PIN to transfer ₦${formattedAmount}${namePart}${bankPart}${sourcePart}.`;
   }
+
   async ensureTransferFollowUp(ctx, userId, intent) {
     const entities = intent?.entities || {};
     const existingSession = this.sessions.get(userId) || {};
@@ -570,6 +610,48 @@ class Kredobot {
       return ctx.reply("Your account could not be found.");
     }
 
+    // ---- PIN check (first thing, so a wrong PIN reveals nothing) ----
+    const lockedUntil = this.getPinLockedUntil(userId);
+    if (lockedUntil) {
+      const mins = Math.ceil((lockedUntil - Date.now()) / 60000);
+      await ctx.reply(
+        `Too many wrong PIN attempts. Try again in ${mins} minute(s).`,
+      );
+      await this.abortTransferFlow(ctx, userId, session, "PIN locked");
+      return;
+    }
+
+    const pinOk = this.verifyPin(user, session.pendingPinValue);
+    session.pendingPinValue = null;
+
+    if (!pinOk) {
+      const entry = this.pinFailures.get(userId) || {
+        count: 0,
+        lockedUntil: 0,
+      };
+      entry.count += 1;
+
+      if (entry.count >= MAX_PIN_ATTEMPTS) {
+        this.pinFailures.set(userId, {
+          count: 0,
+          lockedUntil: Date.now() + PIN_LOCK_MS,
+        });
+        await ctx.reply(
+          "Too many wrong PIN attempts. Transfers are locked for 15 minutes.",
+        );
+        await this.abortTransferFlow(ctx, userId, session, "wrong PIN");
+        return;
+      }
+
+      this.pinFailures.set(userId, entry);
+      await ctx.reply(
+        `Incorrect PIN. ${MAX_PIN_ATTEMPTS - entry.count} attempt(s) left.`,
+      );
+      await ctx.reply(session.pendingQuestion);
+      return;
+    }
+    this.pinFailures.delete(userId);
+
     console.log("DRAFT:", session.draft);
 
     const recipientName =
@@ -661,23 +743,6 @@ class Kredobot {
 
     const recipientDisplayName =
       recipientAccount.account_name || recipientName || "recipient";
-
-    const enteredPin = String(session.pendingPinValue || "");
-    if (String(user.pin) !== enteredPin) {
-      // Wrong PIN — stay on the SAME transfer (don't touch the queue),
-      // just ask again.
-      session.pendingPinValue = null;
-      session.pendingField = "pin";
-      session.pendingQuestion = this.getTransferPinPrompt({
-        amount,
-        recipientName: recipientDisplayName,
-        recipientBank: session.draft.recipient_bank || "recipient bank",
-        senderBank: session.draft.sender_bank || "your account",
-      });
-      await ctx.reply("Incorrect PIN. Please try again.");
-      await ctx.reply(session.pendingQuestion);
-      return;
-    }
 
     // Generate the reference ONCE so the receipt, DB row and messages all match.
     const reference = `KREDO-${Date.now()}`;
@@ -934,10 +999,16 @@ Your receipt is below.`,
 Your account is already set up, so you can continue the conversation normally.`,
       );
     });
+
     this.bot.command("signup", async (ctx) => {
       console.log("SIGNUP HIT", ctx.from.id);
       await this.handleSignup(ctx);
     });
+
+    this.bot.command("cancel", async (ctx) => {
+      await this.handleCancelTransaction(ctx, ctx.from.id);
+    });
+
     this.bot.command("add_account", async (ctx) => {
       await this.typing(ctx);
 
@@ -1051,9 +1122,17 @@ What nickname would you like to save this beneficiary as?`,
         // Get the user's current session.
         const session = this.sessions.get(userId);
 
+        // Cancel works in every flow (PIN step, beneficiary confirm, etc.).
+        // Checked before anything else so it can't be swallowed as an answer.
+        if (session && this.isCancelMessage(text)) {
+          await this.handleCancelTransaction(ctx, userId);
+          return;
+        }
+
         // Media can't answer a step-by-step flow (PIN, account number, etc.).
-        // Without this guard an empty string would be saved as the answer.
-        if (session && !ctx.message.text) {
+        // Balance-check follow-ups are exempt: they fall through to normal
+        // intent handling if the message isn't an account choice.
+        if (session && session.flow !== "balance_check" && !ctx.message.text) {
           return ctx.reply("Please reply with text to continue.");
         }
 
@@ -1061,81 +1140,29 @@ What nickname would you like to save this beneficiary as?`,
         // BALANCE CHECK FLOW
         // =========================
         if (session?.flow === "balance_check") {
-          const accounts = Array.isArray(session.accounts)
-            ? session.accounts
-            : [];
-
-          if (!accounts.length) {
-            this.sessions.delete(userId);
-            return ctx.reply(
-              "I couldn't find any linked accounts for you. Please add one with /add_account.",
-            );
-          }
-
+          const accounts = await this.getUserBankAccounts(userId); // fresh balances
           const answer = String(text).trim();
           const normalized = answer.toLowerCase();
 
-          const matchingAccount =
+          const match =
             accounts.find(
-              (account) =>
-                String(account.bank_name || "")
+              (a) =>
+                String(a.bank_name || "")
                   .trim()
                   .toLowerCase() === normalized,
-            ) ||
-            accounts.find(
-              (account, index) =>
-                String(index + 1) === answer ||
-                `${index + 1}. ${String(account.bank_name || "").trim()}`.toLowerCase() ===
-                  normalized,
-            );
+            ) || accounts.find((a, i) => String(i + 1) === answer);
 
-          if (!matchingAccount) {
-            const previousBank = String(session.lastBalanceBank || "").trim();
-            const followUpBank =
-              previousBank &&
-              ["what of", "what about", "and", "then", "next"].some((phrase) =>
-                normalized.includes(phrase),
-              )
-                ? previousBank
-                : null;
+          // The session is always cleared. If the message wasn't an answer,
+          // fall through and treat it as a normal request
+          // (e.g. "send 5000 to ...").
+          this.sessions.delete(userId);
 
-            const resolvedFromPrevious = followUpBank
-              ? accounts.find(
-                  (account) =>
-                    String(account.bank_name || "")
-                      .trim()
-                      .toLowerCase() === followUpBank.toLowerCase(),
-                )
-              : null;
-
-            if (resolvedFromPrevious) {
-              const balance = Number(resolvedFromPrevious.balance ?? 0);
-              this.sessions.delete(userId);
-              await ctx.reply(
-                `💰 Your ${resolvedFromPrevious.bank_name} balance is ₦${balance.toLocaleString("en-NG")}.`,
-              );
-              return;
-            }
-
-            const options = accounts
-              .map(
-                (account, index) =>
-                  `${index + 1}. ${account.bank_name}${account.account_no ? ` •••••${String(account.account_no).slice(-4)}` : ""}`,
-              )
-              .join("\n");
-
+          if (match) {
             await ctx.reply(
-              `I couldn't match that. Please choose one of these accounts:\n\n${options}`,
+              `💰 Your ${match.bank_name} balance is ₦${Number(match.balance ?? 0).toLocaleString("en-NG")}.`,
             );
             return;
           }
-
-          const balance = Number(matchingAccount.balance ?? 0);
-          this.sessions.delete(userId);
-          await ctx.reply(
-            `💰 Your ${matchingAccount.bank_name} balance is ₦${balance.toLocaleString("en-NG")}.`,
-          );
-          return;
         }
 
         // =========================
@@ -1202,6 +1229,8 @@ What nickname would you like to save this beneficiary as?`,
           }
 
           if (field === "pin") {
+            // Remove the PIN from the chat history.
+            ctx.deleteMessage().catch(() => {});
             session.pendingPinValue = text;
             await this.completeTransferWithPin(userId, ctx, session);
             return;
@@ -1483,17 +1512,19 @@ Account holder: ${session.account_name}`,
           }
 
           if (session.step === "pin") {
-            await this.typing(ctx);
-            session.pin = text;
+            // Remove the PIN from the chat history.
+            await ctx.deleteMessage().catch(() => {});
+
+            if (!/^\d{4}$/.test(text)) {
+              return ctx.reply("Your PIN must be exactly 4 digits. Try again.");
+            }
 
             const savedUser = await this.createUser({
               telegramId: userId,
               name: session.name,
               phone: session.phone,
-              pin: session.pin,
+              pin: text,
             });
-
-            this.accounts.push(savedUser);
 
             // Signup is complete.
             this.sessions.delete(userId);
@@ -1508,8 +1539,6 @@ Welcome to Kredo, ${savedUser.name}! 🇳🇬🚀
 
 Use /add_account to link your bank accounts to Kredo.`,
             );
-
-            console.log(this.accounts);
 
             return;
           }
@@ -1800,8 +1829,7 @@ You can now use "${accountName}" when referring to this account. 🇳🇬`,
     ) {
       return weekStart;
     }
-    if (raw.includes("this month") || raw.includes("this month"))
-      return thisMonthStart;
+    if (raw.includes("this month")) return thisMonthStart;
     if (raw.includes("last month") || raw.includes("last 30 days"))
       return lastMonthStart;
 
@@ -1974,20 +2002,6 @@ You can now use "${accountName}" when referring to this account. 🇳🇬`,
     if (hasToday) {
       return {
         fromDate: todayStart,
-        toDate: today,
-      };
-    }
-
-    if (lower.includes("last week") || lower.includes("last 7 days")) {
-      return {
-        fromDate: weekStart,
-        toDate: today,
-      };
-    }
-
-    if (lower.includes("last month") || lower.includes("last 30 days")) {
-      return {
-        fromDate: monthStart,
         toDate: today,
       };
     }
@@ -2167,57 +2181,55 @@ You can now use "${accountName}" when referring to this account. 🇳🇬`,
   }
 
   async handleCancelTransaction(ctx, userId) {
-    const existingSession = this.sessions.get(userId);
+    const session = this.sessions.get(userId);
 
-    if (existingSession) {
-      const queue = existingSession.queue || [];
-      const batchResults = existingSession.batchResults || [];
-      const batchTotal = existingSession.batchTotal || null;
-      const isBatch = Boolean(batchTotal);
+    if (!session) {
+      await ctx.reply("There is no pending transaction to cancel.");
+      return false;
+    }
 
-      if (isBatch) {
-        batchResults.push({
-          label: this.describeTransferDraft(existingSession.draft),
-          status: "cancelled",
-        });
-      }
+    this.sessions.delete(userId);
 
-      this.sessions.delete(userId);
-      await ctx.reply("Transaction cancelled. No money was sent.");
-
-      // Cancelling only skips the CURRENT transfer — if this was part of a
-      // multi-transfer message, the rest of the batch keeps going.
-      if (isBatch) {
-        await this.continueTransferQueue(
-          ctx,
-          userId,
-          queue,
-          batchResults,
-          batchTotal,
-        );
-      }
-
+    if (session.flow !== "transfer") {
+      await ctx.reply("Okay, cancelled.");
       return true;
     }
 
-    await ctx.reply("There is no pending transaction to cancel.");
-    return false;
+    const queue = session.queue || [];
+    const batchResults = session.batchResults || [];
+    const batchTotal = session.batchTotal || null;
+
+    if (batchTotal) {
+      batchResults.push({
+        label: this.describeTransferDraft(session.draft),
+        status: "cancelled",
+      });
+    }
+
+    await ctx.reply("Transaction cancelled. No money was sent.");
+
+    // Cancelling only skips the current transfer; the rest of the batch continues.
+    if (batchTotal) {
+      await this.continueTransferQueue(
+        ctx,
+        userId,
+        queue,
+        batchResults,
+        batchTotal,
+      );
+    }
+
+    return true;
   }
 
   async handleBalanceCheck(ctx, userId, intent) {
     const user = await this.findByTelegramId(userId);
-
     if (!user) {
       await ctx.reply("Please create an account first. Use /signup.");
       return;
     }
 
-    const session = this.sessions.get(userId) || {};
-    const explicitBank = String(intent?.entities?.sender_bank || "").trim();
-    const fallbackBank = String(session.lastBalanceBank || "").trim();
-    const requestedBank = explicitBank || fallbackBank;
     const accounts = await this.getUserBankAccounts(userId);
-
     if (!accounts.length) {
       await ctx.reply(
         "You don't have any linked bank accounts yet. Use /add_account to add one first.",
@@ -2225,73 +2237,40 @@ You can now use "${accountName}" when referring to this account. 🇳🇬`,
       return;
     }
 
+    const showBalance = (a) =>
+      ctx.reply(
+        `💰 Your ${a.bank_name} balance is ₦${Number(a.balance ?? 0).toLocaleString("en-NG")}.`,
+      );
+
+    const requestedBank = String(intent?.entities?.sender_bank || "").trim();
+
     if (requestedBank) {
       const match = accounts.find(
-        (account) =>
-          String(account.bank_name || "")
+        (a) =>
+          String(a.bank_name || "")
             .trim()
             .toLowerCase() === requestedBank.toLowerCase(),
       );
-
-      if (!match) {
-        await ctx.reply(
-          `I couldn't find ${requestedBank} in your linked accounts. Which account would you like to check?`,
-        );
-        this.sessions.set(userId, {
-          ...session,
-          flow: "balance_check",
-          accounts,
-          lastBalanceBank: fallbackBank || requestedBank,
-        });
-        return;
-      }
-
-      const balance = Number(match.balance ?? 0);
-      this.sessions.set(userId, {
-        ...session,
-        flow: "balance_check",
-        accounts,
-        lastBalanceBank: match.bank_name,
-      });
-
-      await ctx.reply(
-        `💰 Your ${match.bank_name} balance is ₦${balance.toLocaleString("en-NG")}.`,
-      );
-      return;
-    }
-
-    if (accounts.length === 1) {
-      const [account] = accounts;
-      this.sessions.set(userId, {
-        ...session,
-        flow: "balance_check",
-        accounts,
-        lastBalanceBank: account.bank_name,
-      });
-
-      const balance = Number(account.balance ?? 0);
-      await ctx.reply(
-        `💰 Your ${account.bank_name} balance is ₦${balance.toLocaleString("en-NG")}.`,
-      );
-      return;
+      if (match) return showBalance(match);
+    } else if (accounts.length === 1) {
+      return showBalance(accounts[0]);
     }
 
     const options = accounts
       .map(
-        (account, index) =>
-          `${index + 1}. ${account.bank_name}${account.account_no ? ` •••••${String(account.account_no).slice(-4)}` : ""}`,
+        (a, i) =>
+          `${i + 1}. ${a.bank_name}${a.account_no ? ` •••••${String(a.account_no).slice(-4)}` : ""}`,
       )
       .join("\n");
 
-    this.sessions.set(userId, {
-      ...session,
-      flow: "balance_check",
-      accounts,
-      lastBalanceBank: fallbackBank,
-    });
+    // Only now are we actually waiting for an answer.
+    this.sessions.set(userId, { flow: "balance_check" });
 
+    const prefix = requestedBank
+      ? `I couldn't find ${requestedBank} in your linked accounts. `
+      : "";
     await ctx.reply(
-      `Which account would you like to check?\n\n${options}\n\nReply with the bank name or the number beside it.`,
+      `${prefix}Which account would you like to check?\n\n${options}\n\nReply with the bank name or the number beside it.`,
     );
   }
 
@@ -2299,7 +2278,7 @@ You can now use "${accountName}" when referring to this account. 🇳🇬`,
   // In a cleaner architecture, this should move to a service file, but this is
   // kept here temporarily for learning and experimentation.
   async createUser(user) {
-    const [result] = await db.execute(
+    await db.execute(
       "INSERT INTO users (telegramId, name, phone, pin) VALUES (?, ?, ?, ?)",
       [user.telegramId, user.name, user.phone, user.pin],
     );

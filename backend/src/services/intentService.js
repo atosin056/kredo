@@ -134,6 +134,12 @@ Apply the same intent rules as typed messages:
 - cancel_transaction: the user cancels or stops a pending action.
 - unclear: greetings, casual chat, bank-only mentions, or insufficient signal.
 
+First transcribe every audible spoken word into raw_input, then classify that
+transcript. Do not leave raw_input empty when any speech is audible. If a short
+span cannot be understood, write [unintelligible] for that span and still
+transcribe the rest. Never mark the entire clip unintelligible unless it is
+silent or contains no discernible speech.
+
 Extract only information actually spoken. Never guess names, bank names,
 account digits, or amounts. Pay special attention to Nigerian bank and wallet
 names, code-switching, and number words. Preserve amounts exactly: "five
@@ -148,8 +154,9 @@ you can infer, preserving the original language and spoken amount.
 Greetings and casual chat are unclear unless the user clearly asks for a
 financial action. A bank name alone is unclear. Date words such as yesterday,
 today, last week, or last month indicate transaction_history.
-If the audio is silent or unintelligible, use intent "unclear", confidence 0
-and raw_input "".
+If the audio is silent, use intent "unclear", confidence 0 and raw_input "".
+If speech is audible but cannot be understood, use intent "unclear",
+confidence 0 and raw_input "[unintelligible speech]".
 Return only JSON matching the schema.
 `.trim();
 
@@ -427,6 +434,12 @@ async function extractIntent({
   // One multimodal call: text, image and audio all go in together.
   const input = [];
   if (text?.trim()) input.push({ type: "text", text: text.trim() });
+  if (audioBase64) {
+    input.push({
+      type: "text",
+      text: "Transcribe the speech in the attached audio verbatim into raw_input, then extract its intent. Do not return an empty transcript if speech is audible.",
+    });
+  }
   if (imageBase64)
     input.push({ type: "image", data: imageBase64, mime_type: imageMimeType });
   if (audioBase64)
